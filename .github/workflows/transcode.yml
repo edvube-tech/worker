@@ -12,14 +12,17 @@
 #        INFISICAL_CLIENT_SECRET
 #        INFISICAL_PROJECT_SLUG
 #        INFISICAL_ENV_SLUG     # e.g. "prod"
-#   2. Store these in Infisical at the project root (or wherever, then set
-#      INFISICAL_SECRET_PATH accordingly):
-#        R2_ACCESS_KEY_ID       # scope: GetObject raw/*, PutObject hls/* only
-#        R2_SECRET_ACCESS_KEY   # (NOT the same key the backend uses for presign — A6)
-#        R2_ENDPOINT            # https://<account>.r2.cloudflarestorage.com
-#        R2_BUCKET
-#        R2_PUBLIC_BASE         # e.g. https://cdn.edvube.come
-#        TRANSCODE_WEBHOOK_SECRET   # shared with backend; used for HMAC signing (A1)
+#   2. Infisical layout (env: prod):
+#        /shared/
+#          R2_ACCOUNT_ID                # endpoint built as https://<id>.r2.cloudflarestorage.com
+#          R2_ACCESS_KEY_ID             # scope: GetObject raw/*, PutObject hls/*
+#          R2_SECRET_ACCESS_KEY         # NOT the same key the backend uses for presign
+#          R2_BUCKET
+#          R2_PUBLIC_BASE               # e.g. https://cdn.edvube.com
+#          TRANSCODE_WEBHOOK_SECRET     # shared with backend; HMAC signing
+#        /worker/
+#          CALLBACK_URL                 # = backend's TRANSCODE_WEBHOOK_CALLBACK_URL
+#          LOG_LEVEL                    # info|warning|error  (maps to ffmpeg -loglevel)
 #   3. Allow the edvube-backend PAT (actions:write on this repo) to dispatch.
 
 name: transcode-video
@@ -45,14 +48,12 @@ jobs:
     env:
       SUBMODULE_ID: ${{ github.event.client_payload.submodule_id }}
       SOURCE_KEY: ${{ github.event.client_payload.source_key }}
-      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
 
     steps:
       - name: Mask payload values
         run: |
           # Mask dispatch payload before any later step can echo it.
           echo "::add-mask::$SOURCE_KEY"
-          echo "::add-mask::$CALLBACK_URL"
 
       - name: Validate payload
         run: |
@@ -66,33 +67,50 @@ jobs:
             raw/$SUBMODULE_ID/*) ;;
             *) echo "source_key outside expected prefix"; exit 1 ;;
           esac
-          # callback_url must be https://
-          case "$CALLBACK_URL" in
-            https://*) ;;
-            *) echo "callback_url not https"; exit 1 ;;
-          esac
 
-      - name: Load secrets from Infisical
+      - name: Load shared secrets from Infisical
         uses: Infisical/secrets-action@v1.0.7
         with:
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           project-slug: ${{ secrets.INFISICAL_PROJECT_SLUG }}
           env-slug: ${{ secrets.INFISICAL_ENV_SLUG }}
-          secret-path: ${{ vars.INFISICAL_SECRET_PATH || '/' }}
+          secret-path: /shared
           export-type: env
           # The action masks fetched values in logs by default.
 
-      - name: Mask infra identifiers
+      - name: Load worker secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.7
+        with:
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ secrets.INFISICAL_PROJECT_SLUG }}
+          env-slug: ${{ secrets.INFISICAL_ENV_SLUG }}
+          secret-path: /worker
+          export-type: env
+
+      - name: Mask infra identifiers and derive endpoint
         run: |
-          # Belt-and-braces: explicitly mask R2 identifiers and CDN base so they
-          # never surface in aws CLI URLs, error traces, or env dumps.
+          set -euo pipefail
+          # Belt-and-braces: explicitly mask R2 identifiers, CDN base, callback,
+          # and shared secrets so they never surface in aws CLI URLs, error
+          # traces, or env dumps.
+          echo "::add-mask::$R2_ACCOUNT_ID"
           echo "::add-mask::$R2_BUCKET"
-          echo "::add-mask::$R2_ENDPOINT"
           echo "::add-mask::$R2_PUBLIC_BASE"
           echo "::add-mask::$R2_ACCESS_KEY_ID"
           echo "::add-mask::$R2_SECRET_ACCESS_KEY"
           echo "::add-mask::$TRANSCODE_WEBHOOK_SECRET"
+          echo "::add-mask::$CALLBACK_URL"
+          # Derive endpoint (not stored in Infisical).
+          R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          echo "::add-mask::$R2_ENDPOINT"
+          echo "R2_ENDPOINT=$R2_ENDPOINT" >> "$GITHUB_ENV"
+          # callback_url must be https://  (validate after Infisical load)
+          case "$CALLBACK_URL" in
+            https://*) ;;
+            *) echo "callback_url not https"; exit 1 ;;
+          esac
 
       - name: Install ffmpeg
         run: |
@@ -169,8 +187,14 @@ jobs:
             AUDIO_MAP="1:a:0"
             SHORTEST_ARGS=(-shortest)
           fi
-          # -loglevel error: suppress per-frame stats and stream metadata dumps.
-          ffmpeg -y -hide_banner -loglevel error -nostats -i work/input "${AUDIO_INPUT_ARGS[@]}" \
+          # LOG_LEVEL comes from Infisical /worker/; fall back to error.
+          # Public repo — never default to info or debug.
+          FFMPEG_LOGLEVEL="${LOG_LEVEL:-error}"
+          case "$FFMPEG_LOGLEVEL" in
+            quiet|panic|fatal|error|warning) ;;
+            *) FFMPEG_LOGLEVEL=error ;;
+          esac
+          ffmpeg -y -hide_banner -loglevel "$FFMPEG_LOGLEVEL" -nostats -i work/input "${AUDIO_INPUT_ARGS[@]}" \
             -filter_complex "[0:v]split=3[v1][v2][v3]; \
               [v1]scale=w=640:h=360:force_original_aspect_ratio=decrease:force_divisible_by=2[v1out]; \
               [v2]scale=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2[v2out]; \
