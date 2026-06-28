@@ -55,18 +55,27 @@ jobs:
           # Mask dispatch payload before any later step can echo it.
           echo "::add-mask::$SOURCE_KEY"
 
-      - name: Validate payload
+      - name: Validate payload and derive version
         run: |
           set -euo pipefail
           # submodule_id must be a positive integer
           case "$SUBMODULE_ID" in
             ''|*[!0-9]*) echo "invalid submodule_id"; exit 1 ;;
           esac
-          # source_key must live under raw/<submodule_id>/  (do NOT echo the key)
-          case "$SOURCE_KEY" in
-            raw/$SUBMODULE_ID/*) ;;
-            *) echo "source_key outside expected prefix"; exit 1 ;;
+          # source_key must match: raw/<submodule_id>/<8hex>/source.<ext>
+          # (do NOT echo the key — log only the validation outcome)
+          SOURCE_KEY_RE="^raw/${SUBMODULE_ID}/[a-f0-9]{8}/source\.(mp4|mov|mkv|webm)$"
+          if ! [[ "$SOURCE_KEY" =~ $SOURCE_KEY_RE ]]; then
+            echo "source_key shape invalid"; exit 1
+          fi
+          # Extract version segment for HLS output prefix.
+          VERSION=$(echo "$SOURCE_KEY" | awk -F/ '{print $3}')
+          case "$VERSION" in
+            [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]) ;;
+            *) echo "version segment invalid"; exit 1 ;;
           esac
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        shell: bash
 
       - name: Load shared secrets from Infisical
         uses: Infisical/secrets-action@v1.0.7
@@ -162,18 +171,37 @@ jobs:
             --no-progress \
             --only-show-errors
 
+      - name: Sanity-check input size
+        run: |
+          set -euo pipefail
+          # Runner disk ~14 GB. Raw + 3-rendition HLS output + ffmpeg scratch
+          # all live on the same volume — cap raw input at 5 GiB to avoid
+          # ENOSPC mid-transcode.
+          SIZE=$(stat -c%s work/input)
+          MAX=$((5 * 1024 * 1024 * 1024))
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "input too large: $SIZE bytes"; exit 1
+          fi
+          echo "input size: $((SIZE / 1024 / 1024)) MiB"
+
       - name: Probe duration
         id: probe
         run: |
           set -euo pipefail
           dur=$(ffprobe -v error -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 work/input | awk '{printf "%d\n", $1}')
+          # ffprobe returns empty on corrupt input — default to 0 so the
+          # callback jq invocation never sees `--argjson dur ""` and parse-fails.
+          : "${dur:=0}"
           echo "duration_sec=$dur" >> $GITHUB_OUTPUT
 
       - name: Transcode to HLS ladder
         run: |
           set -euo pipefail
-          mkdir -p out/v0 out/v1 out/v2
+          mkdir -p out
+          # Flat output layout: master.m3u8, v0.m3u8/v1.m3u8/v2.m3u8 and
+          # v%v_seg_*.ts all live in out/. Keeps master.m3u8 at the prefix
+          # root after upload (s3 sync mirrors the local tree).
           # Source may have no audio track. Substitute a silent stereo track so
           # the HLS ladder still has audio renditions (required by var_stream_map).
           HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index \
@@ -210,15 +238,17 @@ jobs:
             -map "$AUDIO_MAP" -c:a:2 aac -b:a:2 192k -ac 2 \
             "${SHORTEST_ARGS[@]}" \
             -f hls -hls_time 6 -hls_playlist_type vod -hls_flags independent_segments \
-            -hls_segment_filename "out/v%v/seg_%03d.ts" \
+            -hls_segment_filename "out/v%v_seg_%03d.ts" \
             -master_pl_name master.m3u8 \
             -var_stream_map "v:0,a:0 v:1,a:1 v:2,a:2" \
-            "out/v%v/playlist.m3u8"
+            "out/v%v.m3u8"
 
       - name: Upload HLS output to R2
         run: |
           set -euo pipefail
-          DEST="hls/${SUBMODULE_ID}"
+          # Versioned prefix matches raw/<id>/<version>/ — keeps prior
+          # transcodes intact for rollback (point master_url at old version).
+          DEST="hls/${SUBMODULE_ID}/${VERSION}"
           aws s3 sync out/ "s3://${R2_BUCKET}/${DEST}/" \
             --endpoint-url "${R2_ENDPOINT}" \
             --no-progress \
