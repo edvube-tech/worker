@@ -1,0 +1,170 @@
+name: iOS TestFlight Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      caller_repo:
+        description: "Private repo to checkout (owner/repo)"
+        required: true
+        type: string
+      caller_ref:
+        description: "Branch/ref to checkout from the private repo"
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: macos-26          # was macos-15 — needed for Xcode 26 / iOS 26 SDK
+    timeout-minutes: 60
+    env:
+      BUNDLE_FORCE_RUBY_PLATFORM: "true"
+      BUNDLER_VERSION: "4.0.11"
+      BUNDLE_GEMFILE: ${{ github.workspace }}/ios/Gemfile
+      BUNDLE_PATH: ${{ github.workspace }}/ios/vendor/bundle
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.caller_repo }}
+          ref: ${{ inputs.caller_ref }}
+          token: ${{ secrets.FLUTTER_PRIVATE_REPO_PAT }}
+          fetch-depth: 0
+
+      # TODO: fill in project-id, env-slug and secret-path for this repo's Infisical project.
+      # INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET are the only 2 raw GitHub secrets needed;
+      # everything else is pulled from Infisical at runtime.
+      - name: Fetch secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          domain: https://app.infisical.com
+          project-slug: "soai"
+          env-slug: "prod"
+          secret-path: "/flutter"
+          export-type: env
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Activate flutterfire_cli
+        run: dart pub global activate flutterfire_cli
+
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Restore Ruby gem cache
+        uses: actions/cache@v4
+        with:
+          path: ios/vendor/bundle
+          key: ${{ runner.os }}-${{ runner.arch }}-ruby-3.2-gems-${{ hashFiles('ios/Gemfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ruby-3.2-gems-
+
+      - name: Install exact Bundler version
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/ios/Gemfile
+          BUNDLE_PATH: ${{ github.workspace }}/ios/vendor/bundle
+          BUNDLE_FORCE_RUBY_PLATFORM: "true"
+        run: gem install bundler -v "${{ env.BUNDLER_VERSION }}" --no-document
+
+      - name: Configure bundle path
+        working-directory: ios
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/ios/Gemfile
+          BUNDLE_PATH: ${{ github.workspace }}/ios/vendor/bundle
+          BUNDLE_FORCE_RUBY_PLATFORM: "true"
+        run: bundle _${{ env.BUNDLER_VERSION }}_ config set --local path vendor/bundle
+
+      - name: Bundle install
+        working-directory: ios
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/ios/Gemfile
+          BUNDLE_PATH: ${{ github.workspace }}/ios/vendor/bundle
+          BUNDLE_FORCE_RUBY_PLATFORM: "true"
+        run: bundle _${{ env.BUNDLER_VERSION }}_ install --jobs 4 --retry 3
+
+      - name: Bundle check
+        working-directory: ios
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/ios/Gemfile
+          BUNDLE_PATH: ${{ github.workspace }}/ios/vendor/bundle
+          BUNDLE_FORCE_RUBY_PLATFORM: "true"
+        run: bundle _${{ env.BUNDLER_VERSION }}_ check
+
+      - name: Select latest Xcode 26
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$XCODE_PATH"
+
+      - name: Pod install
+        working-directory: ios
+        run: pod install
+
+      - name: Set build number and build iOS
+        run: |
+          VERSION_NAME=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          flutter build ios --release --no-codesign --build-name="$VERSION_NAME" --build-number="$BUILD_NUMBER"
+
+      - name: Decode signing assets
+        working-directory: ios
+        run: |
+          CERT_PATH="$RUNNER_TEMP/distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+
+          printf '%s' "$IOS_DISTRIBUTION_KEY_P12" | base64 --decode -o "$CERT_PATH"
+          printf '%s' "$IOS_PROVISION_PROFILE_BASE64" | base64 --decode -o "$PROFILE_PATH"
+          printf '%s' "$ASC_KEY_CONTENT_BASE64" | base64 --decode -o "$KEY_PATH"
+
+          printf '%s\n' "CERT_PATH=$CERT_PATH" >> "$GITHUB_ENV"
+          printf '%s\n' "PROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
+          printf '%s\n' "ASC_KEY_FILEPATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Create temporary keychain and import certificate
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/ci-signing.keychain-db"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" -P "$IOS_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Install provisioning profile
+        run: |
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_DIR"
+          cp "$PROFILE_PATH" "$PROFILES_DIR/soai-fastlane-github-action.mobileprovision"
+
+      - name: Fastlane beta (TestFlight)
+        working-directory: ios
+        env:
+          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: "60"
+          FASTLANE_XCODEBUILD_SETTINGS_RETRIES: "4"
+          BUNDLE_GEMFILE: ${{ github.workspace }}/ios/Gemfile
+          BUNDLE_PATH: ${{ github.workspace }}/ios/vendor/bundle
+          BUNDLE_FORCE_RUBY_PLATFORM: "true"
+        run: bundle _${{ env.BUNDLER_VERSION }}_ exec fastlane beta
+
+      - name: Delete temporary keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
