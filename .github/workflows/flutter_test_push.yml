@@ -36,12 +36,12 @@ jobs:
       - name: Fetch secrets from Infisical
         uses: Infisical/secrets-action@v1.0.9
         with:
-          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          client-id: ${{ secrets.FLUTTER_INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.FLUTTER_INFISICAL_CLIENT_SECRET }}
           domain: https://app.infisical.com
-          project-slug: "soai"
+          project-slug: "edvube-x-gk7"
           env-slug: "prod"
-          secret-path: "/flutter"
+          secret-path: "/flutter-ios"
           export-type: env
 
       - name: Set up Flutter
