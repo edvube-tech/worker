@@ -160,7 +160,15 @@ jobs:
           PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PROFILES_DIR"
           cp "$PROFILE_PATH" "$PROFILES_DIR/soai-fastlane-github-action.mobileprovision"
-
+      
+      - name: Verify provisioning profile
+        run: |
+          security cms -D -i "$PROFILE_PATH" > profile.plist
+      
+          /usr/libexec/PlistBuddy -c "Print :Name" profile.plist
+          /usr/libexec/PlistBuddy -c "Print :UUID" profile.plist
+          /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" profile.plist
+      
       - name: Fastlane beta (TestFlight)
         working-directory: ios
         env:
