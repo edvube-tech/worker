@@ -156,7 +156,7 @@ jobs:
           echo "Provisioned Devices:"
           /usr/libexec/PlistBuddy -c "Print :ProvisionedDevices" profile.plist || true
 
-          
+
 
       - name: Create temporary keychain and import certificate
         run: |
@@ -173,11 +173,19 @@ jobs:
 
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
-      - name: Install provisioning profile
+
+      - name: Verify imported certificate
         run: |
-          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-          mkdir -p "$PROFILES_DIR"
-          cp "$PROFILE_PATH" "$PROFILES_DIR/edvube-fastlane-github-action.mobileprovision"
+          echo "===== Code Signing Identities ====="
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+            - name: Install provisioning profile
+              run: |
+                PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+                mkdir -p "$PROFILES_DIR"
+                cp "$PROFILE_PATH" "$PROFILES_DIR/edvube-fastlane-github-action.mobileprovision"
+
+                
 
       - name: Verify provisioning profile
         run: |
