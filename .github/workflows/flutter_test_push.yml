@@ -55,14 +55,14 @@ jobs:
 
       - name: Activate flutterfire_cli
         run: dart pub global activate flutterfire_cli
-      
+
       - name: Debug workspace
         run: |
           pwd
           ls -la
           find . -maxdepth 2 -type f | grep Gemfile || true
           ls -la ios || true      
-      
+
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -121,7 +121,9 @@ jobs:
         run: |
           VERSION_NAME=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
           BUILD_NUMBER=$(git rev-list --count HEAD)
-          flutter build ios --release --no-codesign --build-name="$VERSION_NAME" --build-number="$BUILD_NUMBER"
+          flutter build ios --release --no-codesign \
+            --build-name="$VERSION_NAME" \
+            --build-number="$BUILD_NUMBER"
 
       - name: Decode signing assets
         working-directory: ios
