@@ -55,7 +55,14 @@ jobs:
 
       - name: Activate flutterfire_cli
         run: dart pub global activate flutterfire_cli
-
+      
+      - name: Debug workspace
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 2 -type f | grep Gemfile || true
+          ls -la ios || true      
+      
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
