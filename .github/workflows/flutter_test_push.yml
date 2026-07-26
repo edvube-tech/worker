@@ -140,6 +140,24 @@ jobs:
           printf '%s\n' "PROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
           printf '%s\n' "ASC_KEY_FILEPATH=$KEY_PATH" >> "$GITHUB_ENV"
 
+      - name: Inspect provisioning profile
+        run: |
+          security cms -D -i "$PROFILE_PATH" > profile.plist
+
+          echo "Profile Name:"
+          /usr/libexec/PlistBuddy -c "Print :Name" profile.plist
+
+          echo "UUID:"
+          /usr/libexec/PlistBuddy -c "Print :UUID" profile.plist
+
+          echo "Application Identifier:"
+          /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" profile.plist
+
+          echo "Provisioned Devices:"
+          /usr/libexec/PlistBuddy -c "Print :ProvisionedDevices" profile.plist || true
+
+          
+
       - name: Create temporary keychain and import certificate
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/ci-signing.keychain-db"
@@ -159,16 +177,16 @@ jobs:
         run: |
           PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PROFILES_DIR"
-          cp "$PROFILE_PATH" "$PROFILES_DIR/soai-fastlane-github-action.mobileprovision"
-      
+          cp "$PROFILE_PATH" "$PROFILES_DIR/edvube-fastlane-github-action.mobileprovision"
+
       - name: Verify provisioning profile
         run: |
           security cms -D -i "$PROFILE_PATH" > profile.plist
-      
+
           /usr/libexec/PlistBuddy -c "Print :Name" profile.plist
           /usr/libexec/PlistBuddy -c "Print :UUID" profile.plist
           /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" profile.plist
-      
+
       - name: Fastlane beta (TestFlight)
         working-directory: ios
         env:
