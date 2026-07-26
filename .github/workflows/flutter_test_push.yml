@@ -178,12 +178,13 @@ jobs:
         run: |
           echo "===== Code Signing Identities ====="
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          
 
-            - name: Install provisioning profile
-              run: |
-                PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-                mkdir -p "$PROFILES_DIR"
-                cp "$PROFILE_PATH" "$PROFILES_DIR/edvube-fastlane-github-action.mobileprovision"
+      - name: Install provisioning profile
+        run: |
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_DIR"
+          cp "$PROFILE_PATH" "$PROFILES_DIR/edvube-fastlane-github-action.mobileprovision"
 
                 
 
