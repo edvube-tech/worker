@@ -178,14 +178,21 @@ jobs:
         run: |
           echo "===== Code Signing Identities ====="
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-          
+
 
       - name: Install provisioning profile
         run: |
+          security cms -D -i "$PROFILE_PATH" > profile.plist
+
+          UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" profile.plist)
+
           PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PROFILES_DIR"
-          cp "$PROFILE_PATH" "$PROFILES_DIR/edvube-fastlane-github-action.mobileprovision"
 
+          cp "$PROFILE_PATH" "$PROFILES_DIR/$UUID.mobileprovision"
+
+          echo "Installed profile:"
+          ls -l "$PROFILES_DIR"
                 
 
       - name: Verify provisioning profile
@@ -195,6 +202,12 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :Name" profile.plist
           /usr/libexec/PlistBuddy -c "Print :UUID" profile.plist
           /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" profile.plist
+
+      - name: Set default keychain
+        run: |
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
 
       - name: Fastlane beta (TestFlight)
         working-directory: ios
@@ -212,3 +225,9 @@ jobs:
           if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
             security delete-keychain "$KEYCHAIN_PATH"
           fi
+
+
+      - name: Dump gym log
+        if: always()
+        run: |
+          cat ~/Library/Logs/gym/Runner-Runner.log
