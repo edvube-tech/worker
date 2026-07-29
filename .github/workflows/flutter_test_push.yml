@@ -203,11 +203,6 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :UUID" profile.plist
           /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" profile.plist
 
-      - name: Set default keychain
-        run: |
-          security default-keychain -s "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
 
       - name: Fastlane beta (TestFlight)
         working-directory: ios
