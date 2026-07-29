@@ -203,6 +203,17 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :UUID" profile.plist
           /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" profile.plist
 
+      - name: Show Runner signing settings
+        run: |
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -showBuildSettings | grep -E \
+            "PRODUCT_BUNDLE_IDENTIFIER|CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|PROVISIONING_PROFILE|PROVISIONING_PROFILE_SPECIFIER"
+
+
+
+
 
       - name: Fastlane beta (TestFlight)
         working-directory: ios
