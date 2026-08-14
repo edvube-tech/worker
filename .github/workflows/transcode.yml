@@ -222,29 +222,66 @@ jobs:
             quiet|panic|fatal|error|warning) ;;
             *) FFMPEG_LOGLEVEL=error ;;
           esac
+
+          # Source height/fps decide which rungs are worth encoding and the
+          # GOP size (keyframe interval tied to actual fps, not a guess).
+          SRC_H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height \
+            -of csv=p=0 work/input)
+          SRC_FPS_RAW=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
+            -of csv=p=0 work/input)
+          FPS=$(awk -F'/' '{ if ($2==0){print 30} else {r=$1/$2; if (r<1) r=30; printf "%d", r+0.5} }' <<< "$SRC_FPS_RAW")
+          GOP=$(( FPS * 6 ))
+
+          RUNG_W=(640 1280 1920)
+          RUNG_H=(360 720 1080)
+          RUNG_CRF=(23 21 20)
+          RUNG_MAXRATE=(856k 2996k 5350k)
+          RUNG_BUFSIZE=(1200k 4200k 7500k)
+          RUNG_PROFILE=(main main high)
+
+          # Always keep the 360p floor. Only add a higher rung if the source
+          # actually has the resolution to fill it — skips encoding/storing a
+          # near-duplicate of a lower rung for low-res uploads.
+          INCLUDE=(0)
+          for i in 1 2; do
+            if [ "$SRC_H" -ge "${RUNG_H[$i]}" ]; then
+              INCLUDE+=("$i")
+            fi
+          done
+          N=${#INCLUDE[@]}
+
+          SPLIT_LABELS=""
+          for j in $(seq 1 "$N"); do SPLIT_LABELS+="[s$j]"; done
+          FILTER="[0:v]split=$N${SPLIT_LABELS};"
+          VIDEO_ARGS=()
+          j=0
+          for i in "${INCLUDE[@]}"; do
+            j=$((j + 1))
+            vidx=$((j - 1))
+            FILTER+=" [s$j]scale=w=${RUNG_W[$i]}:h=${RUNG_H[$i]}:force_original_aspect_ratio=decrease:force_divisible_by=2[v${j}out];"
+            VIDEO_ARGS+=(-map "[v${j}out]" -c:v:$vidx libx264 -preset veryfast -profile:v "${RUNG_PROFILE[$i]}" \
+              -crf:v:$vidx "${RUNG_CRF[$i]}" -maxrate:v:$vidx "${RUNG_MAXRATE[$i]}" -bufsize:v:$vidx "${RUNG_BUFSIZE[$i]}" \
+              -g "$GOP" -keyint_min "$GOP" -sc_threshold 0)
+          done
+          FILTER="${FILTER%;}"
+
+          # One shared audio encode (HLS audio group) instead of one re-encode
+          # per video rung — same audio quality, a third of the audio work.
+          VAR_STREAM_MAP="a:0,agroup:aud,default:yes,name:audio"
+          for j in $(seq 1 "$N"); do
+            vidx=$((j - 1))
+            VAR_STREAM_MAP+=" v:$vidx,agroup:aud"
+          done
+
           ffmpeg -y -hide_banner -loglevel "$FFMPEG_LOGLEVEL" -nostats -i work/input "${AUDIO_INPUT_ARGS[@]}" \
-            -filter_complex "[0:v]split=4[v1][v2][v3][v4]; \
-              [v1]scale=w=640:h=360:force_original_aspect_ratio=decrease:force_divisible_by=2[v1out]; \
-              [v2]scale=w=854:h=480:force_original_aspect_ratio=decrease:force_divisible_by=2[v2out]; \
-              [v3]scale=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2[v3out]; \
-              [v4]scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2[v4out]" \
-            -map "[v1out]" -c:v:0 libx264 -preset veryfast -profile:v main \
-              -b:v:0 800k  -maxrate:v:0 856k  -bufsize:v:0 1200k -g 48 -keyint_min 48 -sc_threshold 0 \
-            -map "[v2out]" -c:v:1 libx264 -preset veryfast -profile:v main \
-              -b:v:1 1400k -maxrate:v:1 1498k -bufsize:v:1 2100k -g 48 -keyint_min 48 -sc_threshold 0 \
-            -map "[v3out]" -c:v:2 libx264 -preset veryfast -profile:v main \
-              -b:v:2 2800k -maxrate:v:2 2996k -bufsize:v:2 4200k -g 48 -keyint_min 48 -sc_threshold 0 \
-            -map "[v4out]" -c:v:3 libx264 -preset veryfast -profile:v high \
-              -b:v:3 5000k -maxrate:v:3 5350k -bufsize:v:3 7500k -g 48 -keyint_min 48 -sc_threshold 0 \
-            -map "$AUDIO_MAP" -c:a:0 aac -b:a:0 96k  -ac 2 \
-            -map "$AUDIO_MAP" -c:a:1 aac -b:a:1 128k -ac 2 \
-            -map "$AUDIO_MAP" -c:a:2 aac -b:a:2 128k -ac 2 \
-            -map "$AUDIO_MAP" -c:a:3 aac -b:a:3 192k -ac 2 \
+            -filter_complex "$FILTER" \
+            "${VIDEO_ARGS[@]}" \
+            -map "$AUDIO_MAP" -c:a:0 aac -b:a:0 128k -ac 2 \
             "${SHORTEST_ARGS[@]}" \
             -f hls -hls_time 6 -hls_playlist_type vod -hls_flags independent_segments \
             -hls_segment_filename "out/v%v_seg_%03d.ts" \
             -master_pl_name master.m3u8 \
-            -var_stream_map "v:0,a:0 v:1,a:1 v:2,a:2 v:3,a:3" \
+            -var_stream_map "$VAR_STREAM_MAP" \
             "out/v%v.m3u8"
 
       - name: Upload HLS output to R2
