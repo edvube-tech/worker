@@ -1,0 +1,32 @@
+name: trigger-abandoned-payments
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: trigger-abandoned-payments
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call payments/abandoned/trigger endpoint
+        run: |
+          set -euo pipefail
+          url="${{ secrets.API_BASE_URL }}/api/payments/abandoned/trigger/"
+
+          http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
+            -X POST "$url" \
+            -H "X-Api-Key: ${{ secrets.ENROLLMENTS_API_KEY }}")
+
+          echo "HTTP $http_code"
+          cat /tmp/response.json
+          echo
+
+          if [ "$http_code" -ge 300 ]; then
+            echo "::error::abandoned-payments trigger failed with HTTP $http_code"
+            exit 1
+          fi
