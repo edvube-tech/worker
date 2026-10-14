@@ -27,8 +27,8 @@ jobs:
       - name: Fetch production DB secrets from Infisical
         uses: Infisical/secrets-action@v1.0.16
         with:
-          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          client-id: ${{ secrets.TRIPIFO_INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.TRIPIFO_INFISICAL_CLIENT_SECRET }}
           project-slug: ${{ secrets.TRIPIFO_INFISICAL_PROJECT_SLUG }}
           env-slug: prod
           secret-path: /
@@ -37,8 +37,8 @@ jobs:
       - name: Fetch backup secrets from Infisical
         uses: Infisical/secrets-action@v1.0.16
         with:
-          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          client-id: ${{ secrets.TRIPIFO_INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.TRIPIFO_INFISICAL_CLIENT_SECRET }}
           project-slug: ${{ secrets.TRIPIFO_INFISICAL_PROJECT_SLUG }}
           env-slug: prod
           secret-path: /worker
