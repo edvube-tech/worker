@@ -1,0 +1,181 @@
+name: DB backup
+run-name: DB backup ${{ inputs.request_id }} (${{ inputs.reason }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Id of the triggering run in tripifo-tancube
+        required: false
+        default: manual
+      reason:
+        description: Why this backup was taken
+        required: false
+        default: manual
+
+permissions: {}
+
+concurrency:
+  group: tripifo-db-backup
+  cancel-in-progress: false
+
+env:
+  R2_PREFIX: tripifo/prod
+  # Relative to the SSH user's $HOME on the Droplet; removed at the end of every run.
+  REMOTE_DIR: tripifo-db-backup-tmp/${{ github.run_id }}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Fetch production DB secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ secrets.TRIPIFO_INFISICAL_PROJECT_SLUG }}
+          env-slug: prod
+          secret-path: /
+          export-type: env
+
+      - name: Fetch backup secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ secrets.TRIPIFO_INFISICAL_PROJECT_SLUG }}
+          env-slug: prod
+          secret-path: /worker
+          export-type: env
+
+      - name: Validate secrets
+        shell: bash
+        run: |
+          missing=0
+          for key in DB_CONNECTION DB_DATABASE DB_USERNAME DB_PASSWORD DB_CONTAINER VPS_HOST VPS_USER VPS_SSH_KEY R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing required Infisical secret: $key"
+              missing=1
+            fi
+          done
+
+          case "${DB_CONNECTION:-}" in
+            mysql|pgsql) ;;
+            *)
+              echo "::error::DB_CONNECTION must be mysql or pgsql."
+              missing=1
+              ;;
+          esac
+
+          exit "$missing"
+
+      - name: Set up SSH agent
+        id: ssh
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ env.VPS_SSH_KEY }}
+
+      - name: Trust Droplet host key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          if [ -n "${VPS_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$VPS_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+
+      - name: Create compressed dump on Droplet
+        id: dump
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          case "$DB_CONNECTION" in
+            mysql) name="tripifo-prod-$stamp.sql.gz" ;;
+            pgsql) name="tripifo-prod-$stamp.dump" ;;
+          esac
+
+          # The script (with credentials as variables) is sent over SSH stdin,
+          # so the DB password never appears in a process list or in the logs.
+          {
+            printf 'DB_CONNECTION=%q\n' "$DB_CONNECTION"
+            printf 'DB_DATABASE=%q\n' "$DB_DATABASE"
+            printf 'DB_USERNAME=%q\n' "$DB_USERNAME"
+            printf 'DB_PASSWORD=%q\n' "$DB_PASSWORD"
+            printf 'DB_CONTAINER=%q\n' "$DB_CONTAINER"
+            printf 'REMOTE_DIR=%q\n' "$REMOTE_DIR"
+            printf 'NAME=%q\n' "$name"
+            cat <<'REMOTE'
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/$REMOTE_DIR"
+          out="$HOME/$REMOTE_DIR/$NAME"
+
+          case "$DB_CONNECTION" in
+            mysql)
+              export MYSQL_PWD="$DB_PASSWORD"
+              docker exec -e MYSQL_PWD "$DB_CONTAINER" \
+                mysqldump -u"$DB_USERNAME" --single-transaction --quick --no-tablespaces --set-gtid-purged=OFF "$DB_DATABASE" \
+                | gzip -9 > "$out"
+              gzip -t "$out"
+              gzip -dc "$out" | tail -n 1 | grep -q '^-- Dump completed' \
+                || { echo "Dump is incomplete (missing 'Dump completed' trailer)." >&2; exit 1; }
+              ;;
+            pgsql)
+              export PGPASSWORD="$DB_PASSWORD"
+              docker exec -e PGPASSWORD "$DB_CONTAINER" \
+                pg_dump -U "$DB_USERNAME" -d "$DB_DATABASE" --format=custom --compress=9 --no-owner \
+                > "$out"
+              docker exec -i "$DB_CONTAINER" pg_restore --list < "$out" > /dev/null
+              ;;
+          esac
+
+          [ -s "$out" ] || { echo "Dump file is empty." >&2; exit 1; }
+          du -h "$out" | cut -f1
+          REMOTE
+          } | ssh -o BatchMode=yes -o ServerAliveInterval=30 "$VPS_USER@$VPS_HOST" 'bash -s' > "$RUNNER_TEMP/dump-size"
+
+          echo "Compressed dump size: $(cat "$RUNNER_TEMP/dump-size")"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+
+      - name: Copy dump from Droplet
+        shell: bash
+        env:
+          NAME: ${{ steps.dump.outputs.name }}
+        run: |
+          set -euo pipefail
+          scp -q -o BatchMode=yes "$VPS_USER@$VPS_HOST:$REMOTE_DIR/$NAME" "$RUNNER_TEMP/$NAME"
+          [ -s "$RUNNER_TEMP/$NAME" ]
+
+      - name: Upload to Cloudflare R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # Newer AWS CLI checksum defaults are not fully supported by R2.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          NAME: ${{ steps.dump.outputs.name }}
+          STAMP: ${{ steps.dump.outputs.stamp }}
+        run: |
+          set -euo pipefail
+          key="$R2_PREFIX/${STAMP:0:4}/${STAMP:4:2}/$NAME"
+          aws s3 cp "$RUNNER_TEMP/$NAME" "s3://$R2_BUCKET/$key" \
+            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
+            --only-show-errors
+          echo "Uploaded backup: $key" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete temporary dump on Droplet
+        if: always() && steps.ssh.outcome == 'success'
+        shell: bash
+        run: ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "rm -rf -- \"\$HOME/$REMOTE_DIR\""
+
+      - name: Clean up runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/tripifo-prod-*
