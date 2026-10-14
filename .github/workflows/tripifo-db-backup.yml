@@ -1,17 +1,12 @@
-name: DB backup
+name: Tripifo DB backup
 run-name: DB backup ${{ inputs.request_id }} (${{ inputs.reason }})
 
 on:
+  schedule:
+    # 02:00 IST = 20:30 UTC (previous day) and 14:00 IST = 08:30 UTC
+    - cron: "30 20 * * *"
+    - cron: "30 8 * * *"
   workflow_dispatch:
-    inputs:
-      request_id:
-        description: Id of the triggering run in tripifo-tancube
-        required: false
-        default: manual
-      reason:
-        description: Why this backup was taken
-        required: false
-        default: manual
 
 permissions: {}
 
