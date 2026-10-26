@@ -1,0 +1,89 @@
+name: Edvube Android Internal Testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      caller_repo:
+        description: Private Flutter app repository (owner/name)
+        required: true
+        type: string
+      caller_ref:
+        description: Branch or ref to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-play-internal
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source ref
+        env:
+          CALLER_REF: ${{ inputs.caller_ref }}
+        run: git check-ref-format --branch "$CALLER_REF"
+
+      - name: Check out Flutter app source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.caller_repo }}
+          ref: ${{ inputs.caller_ref }}
+          token: ${{ secrets.FLUTTER_PRIVATE_REPO_PAT }}
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Set up Ruby and install Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: android
+
+      - name: Configure Android release signing
+        env:
+          ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_UPLOAD_KEYSTORE_BASE64"
+          test -n "$ANDROID_UPLOAD_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_UPLOAD_KEY_ALIAS"
+          test -n "$ANDROID_UPLOAD_KEY_PASSWORD"
+          printf '%s' "$ANDROID_UPLOAD_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$GITHUB_WORKSPACE/android/app/upload-keystore.jks" \
+            "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
+            "$ANDROID_UPLOAD_KEY_ALIAS" \
+            "$ANDROID_UPLOAD_KEY_PASSWORD" > android/key.properties
+
+      - name: Get Flutter dependencies
+        run: flutter pub get
+
+      - name: Build and upload Internal Testing release
+        working-directory: android
+        env:
+          PLAY_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_STORE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          test -n "$PLAY_STORE_SERVICE_ACCOUNT_JSON"
+          bundle exec fastlane android internal
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f android/key.properties android/app/upload-keystore.jks
