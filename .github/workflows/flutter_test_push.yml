@@ -186,7 +186,7 @@ jobs:
 
           UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" profile.plist)
 
-          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILES_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
           mkdir -p "$PROFILES_DIR"
 
           cp "$PROFILE_PATH" "$PROFILES_DIR/$UUID.mobileprovision"
