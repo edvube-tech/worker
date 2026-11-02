@@ -66,6 +66,18 @@ jobs:
           env-slug: "prod"
           secret-path: "/flutter-ios"
           export-type: env
+      
+
+      - name: Create Flutter .env from Infisical
+        shell: bash
+        run: |
+          : "${BASE_URL:?BASE_URL missing from Infisical}"
+      
+          printf 'BASE_URL=%s\n' "$BASE_URL" > .env
+      
+          echo "Flutter .env created successfully"
+          test -s .env
+
 
 
       - name: Configure Android release signing
