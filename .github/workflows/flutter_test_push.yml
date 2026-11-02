@@ -122,8 +122,9 @@ jobs:
           VERSION_NAME=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
           BUILD_NUMBER=$(git rev-list --count HEAD)
           flutter build ios --release --no-codesign \
+            --build-number="$BUILD_NUMBER" \
             --build-name="$VERSION_NAME" \
-            --build-number="$BUILD_NUMBER"
+            --dart-define="BASE_URL=$BASE_URL"
 
       - name: Decode signing assets
         working-directory: ios
