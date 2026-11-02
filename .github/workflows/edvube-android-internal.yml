@@ -55,6 +55,19 @@ jobs:
           bundler-cache: true
           working-directory: android
 
+
+      - name: Fetch secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          client-id: ${{ secrets.FLUTTER_INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.FLUTTER_INFISICAL_CLIENT_SECRET }}
+          domain: https://app.infisical.com
+          project-slug: "edvube-x-gk7"
+          env-slug: "prod"
+          secret-path: "/flutter-ios"
+          export-type: env
+
+
       - name: Configure Android release signing
         env:
           ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
