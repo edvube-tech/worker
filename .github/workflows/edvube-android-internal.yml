@@ -48,6 +48,20 @@ jobs:
           channel: stable
           cache: true
 
+      
+      - name: Debug Gradle version in CI
+        run: |
+          echo "=== CHECKOUT COMMIT ==="
+          git rev-parse HEAD
+      
+          echo "=== GRADLE WRAPPER ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+      
+          echo "=== GRADLE VERSION ==="
+          cd android
+          ./gradlew --version
+
+
       - name: Set up Ruby and install Fastlane
         uses: ruby/setup-ruby@v1
         with:
