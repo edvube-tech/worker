@@ -34,7 +34,7 @@ on:
 # A second dispatch for the same submodule cancels the in-flight job — only
 # the latest upload matters.
 concurrency:
-  group: transcode-${{ github.event.client_payload.submodule_id }}
+  group: transcode-${{ github.event.client_payload.environment }}-${{ github.event.client_payload.submodule_id }}
   cancel-in-progress: true
 
 permissions:
@@ -48,6 +48,7 @@ jobs:
     env:
       SUBMODULE_ID: ${{ github.event.client_payload.submodule_id }}
       SOURCE_KEY: ${{ github.event.client_payload.source_key }}
+      APP_ENV: ${{ github.event.client_payload.environment }}
 
     steps:
       - name: Mask payload values
@@ -77,13 +78,37 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
         shell: bash
 
+
+      - name: Resolve Infisical environment
+        id: resolve_env
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$APP_ENV" in
+            production)
+              ENV_SLUG="prod"
+              ;;
+            staging)
+              ENV_SLUG="staging"
+              ;;
+            *)
+              echo "Invalid or missing environment"
+              exit 1
+              ;;
+          esac
+
+          echo "env_slug=$ENV_SLUG" >> "$GITHUB_OUTPUT"
+          echo "Selected environment: $ENV_SLUG"
+
+
       - name: Load shared secrets from Infisical
         uses: Infisical/secrets-action@v1.0.7
         with:
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           project-slug: ${{ secrets.INFISICAL_PROJECT_SLUG }}
-          env-slug: ${{ secrets.INFISICAL_ENV_SLUG }}
+          env-slug: ${{ steps.resolve_env.outputs.env_slug }}
           secret-path: /shared
           export-type: env
           # The action masks fetched values in logs by default.
@@ -94,7 +119,7 @@ jobs:
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           project-slug: ${{ secrets.INFISICAL_PROJECT_SLUG }}
-          env-slug: ${{ secrets.INFISICAL_ENV_SLUG }}
+          env-slug: ${{ steps.resolve_env.outputs.env_slug }}
           secret-path: /worker
           export-type: env
 
