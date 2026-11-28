@@ -290,7 +290,7 @@ jobs:
       # --------------------------------------------
       - name: Upload APK to Firebase App Distribution
         env:
-          FIREBASE_APP_ID: 1:776978188107:android:28d4d83f0619f0e656cace
+          FIREBASE_APP_ID: 1:498184947959:android:ada1193f57afab2af26bf2
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
         run: |
           set -euo pipefail
