@@ -1,4 +1,5 @@
-name: Edvube Android Internal Testing
+
+name: Edvube Android Internal Testing & Firebase Distribution
 
 on:
   workflow_dispatch:
@@ -22,12 +23,19 @@ concurrency:
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
+
     steps:
+      # --------------------------------------------
+      # Validate source
+      # --------------------------------------------
       - name: Validate source ref
         env:
           CALLER_REF: ${{ inputs.caller_ref }}
         run: git check-ref-format --branch "$CALLER_REF"
 
+      # --------------------------------------------
+      # Checkout Flutter application
+      # --------------------------------------------
       - name: Check out Flutter app source
         uses: actions/checkout@v4
         with:
@@ -36,12 +44,18 @@ jobs:
           token: ${{ secrets.FLUTTER_PRIVATE_REPO_PAT }}
           persist-credentials: false
 
+      # --------------------------------------------
+      # Setup Java
+      # --------------------------------------------
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      # --------------------------------------------
+      # Setup Flutter
+      # --------------------------------------------
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -49,20 +63,16 @@ jobs:
           channel: stable
           cache: true
 
-      
-      - name: Debug Gradle version in CI
-        run: |
-          echo "=== CHECKOUT COMMIT ==="
-          git rev-parse HEAD
-      
-          echo "=== GRADLE WRAPPER ==="
-          cat android/gradle/wrapper/gradle-wrapper.properties
-      
-          echo "=== GRADLE VERSION ==="
-          cd android
-          ./gradlew --version
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        
 
+      - name: Print Flutter version
+        run: flutter --version
 
+      # --------------------------------------------
+      # Setup Ruby and Fastlane
+      # --------------------------------------------
       - name: Set up Ruby and install Fastlane
         uses: ruby/setup-ruby@v1
         with:
@@ -93,8 +103,9 @@ jobs:
           echo "Flutter .env created successfully"
           test -s .env
 
-
-
+      # --------------------------------------------
+      # Configure Android signing
+      # --------------------------------------------
       - name: Configure Android release signing
         env:
           ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
@@ -102,28 +113,233 @@ jobs:
           ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
           ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          umask 077
+
           test -n "$ANDROID_UPLOAD_KEYSTORE_BASE64"
           test -n "$ANDROID_UPLOAD_KEYSTORE_PASSWORD"
           test -n "$ANDROID_UPLOAD_KEY_ALIAS"
           test -n "$ANDROID_UPLOAD_KEY_PASSWORD"
-          printf '%s' "$ANDROID_UPLOAD_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+
+          printf '%s' "$ANDROID_UPLOAD_KEYSTORE_BASE64" \
+            | base64 --decode > android/app/upload-keystore.jks
+
           printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
             "$GITHUB_WORKSPACE/android/app/upload-keystore.jks" \
             "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
             "$ANDROID_UPLOAD_KEY_ALIAS" \
-            "$ANDROID_UPLOAD_KEY_PASSWORD" > android/key.properties
+            "$ANDROID_UPLOAD_KEY_PASSWORD" \
+            > android/key.properties
 
+      # --------------------------------------------
+      # Install Flutter dependencies
+      # --------------------------------------------
       - name: Get Flutter dependencies
         run: flutter pub get
 
+      # --------------------------------------------
+      # Build and upload AAB to Google Play
+      # Fastlane automatically calculates build number
+      # --------------------------------------------
       - name: Build and upload Internal Testing release
         working-directory: android
         env:
           PLAY_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_STORE_SERVICE_ACCOUNT_JSON }}
         run: |
+          set -euo pipefail
+
           test -n "$PLAY_STORE_SERVICE_ACCOUNT_JSON"
+
           bundle exec fastlane android internal
 
+      # --------------------------------------------
+      # Install bundletool
+      # --------------------------------------------
+      - name: Install Android Bundletool
+        run: |
+          set -euo pipefail
+
+          BUNDLETOOL_VERSION="1.18.2"
+
+          curl --fail --silent --show-error --location \
+            --retry 3 \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar" \
+            --output "$RUNNER_TEMP/bundletool.jar"
+
+      # --------------------------------------------
+      # Extract exact version from uploaded AAB
+      # --------------------------------------------
+      - name: Extract release version from AAB
+        id: release-version
+        run: |
+          set -euo pipefail
+
+          AAB_PATH="build/app/outputs/bundle/release/app-release.aab"
+
+          if [[ ! -f "$AAB_PATH" ]]; then
+            echo "::error::Release AAB not found at $AAB_PATH"
+            exit 1
+          fi
+
+          VERSION_NAME=$(java -jar "$RUNNER_TEMP/bundletool.jar" \
+            dump manifest \
+            --bundle="$AAB_PATH" \
+            --xpath='/manifest/@android:versionName')
+
+          BUILD_NUMBER=$(java -jar "$RUNNER_TEMP/bundletool.jar" \
+            dump manifest \
+            --bundle="$AAB_PATH" \
+            --xpath='/manifest/@android:versionCode')
+
+          if [[ -z "$VERSION_NAME" ]]; then
+            echo "::error::Failed to extract version name"
+            exit 1
+          fi
+
+          if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid build number: $BUILD_NUMBER"
+            exit 1
+          fi
+
+          if [[ ! "$VERSION_NAME" =~ ^[0-9A-Za-z.+_-]+$ ]]; then
+            echo "::error::Unexpected version name"
+            exit 1
+          fi
+
+          echo "Version name: $VERSION_NAME"
+          echo "Build number: $BUILD_NUMBER"
+
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+
+      # --------------------------------------------
+      # Build APK with same version as Google Play
+      # --------------------------------------------
+      - name: Build signed release APK
+        run: |
+          set -euo pipefail
+
+          echo "Building APK version ${VERSION_NAME}+${BUILD_NUMBER}"
+
+          flutter build apk \
+            --release \
+            --no-pub \
+            --build-name="$VERSION_NAME" \
+            --build-number="$BUILD_NUMBER"
+
+          APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+
+          if [[ ! -f "$APK_PATH" ]]; then
+            echo "::error::Release APK was not generated"
+            exit 1
+          fi
+
+          echo "APK generated successfully"
+
+      # --------------------------------------------
+      # Verify APK and AAB versions match
+      # --------------------------------------------
+      - name: Verify APK release version
+        run: |
+          set -euo pipefail
+
+          APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+
+          APK_ANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+
+          if [[ ! -x "$APK_ANALYZER" ]]; then
+            APK_ANALYZER=$(find "$ANDROID_HOME/cmdline-tools" \
+              -type f -name apkanalyzer -print -quit)
+          fi
+
+          if [[ -z "$APK_ANALYZER" || ! -x "$APK_ANALYZER" ]]; then
+            echo "::error::apkanalyzer not found"
+            exit 1
+          fi
+
+          APK_VERSION_NAME=$("$APK_ANALYZER" \
+            manifest version-name "$APK_PATH")
+
+          APK_BUILD_NUMBER=$("$APK_ANALYZER" \
+            manifest version-code "$APK_PATH")
+
+          echo "AAB version: ${VERSION_NAME}+${BUILD_NUMBER}"
+          echo "APK version: ${APK_VERSION_NAME}+${APK_BUILD_NUMBER}"
+
+          if [[ "$APK_VERSION_NAME" != "$VERSION_NAME" || \
+                "$APK_BUILD_NUMBER" != "$BUILD_NUMBER" ]]; then
+            echo "::error::APK and AAB versions do not match"
+            exit 1
+          fi
+
+          echo "APK and AAB versions match successfully"
+
+      # --------------------------------------------
+      # Setup Node.js for Firebase CLI
+      # --------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # --------------------------------------------
+      # Upload APK to Firebase App Distribution
+      # --------------------------------------------
+      - name: Upload APK to Firebase App Distribution
+        env:
+          FIREBASE_APP_ID: 1:776978188107:android:28d4d83f0619f0e656cace
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          test -n "$FIREBASE_TOKEN"
+
+          npx --yes firebase-tools appdistribution:distribute \
+            build/app/outputs/flutter-apk/app-release.apk \
+            --app "$FIREBASE_APP_ID" \
+            --groups "qa" \
+            --release-notes "Android Internal Testing - ${VERSION_NAME}+${BUILD_NUMBER}" \
+            --token "$FIREBASE_TOKEN" \
+            --non-interactive
+
+      # --------------------------------------------
+      # Save APK as GitHub Actions artifact
+      # --------------------------------------------
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-${{ steps.release-version.outputs.version_name }}-${{ steps.release-version.outputs.build_number }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      # --------------------------------------------
+      # Release summary
+      # --------------------------------------------
+      - name: Generate release summary
+        run: |
+          {
+            echo "## Android Release Successful"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Version name | $VERSION_NAME |"
+            echo "| Build number | $BUILD_NUMBER |"
+            echo "| Google Play Internal Testing | Uploaded |"
+            echo "| Firebase App Distribution | Uploaded |"
+            echo "| Firebase tester group | qa |"
+            echo "| APK and AAB version match | Verified |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --------------------------------------------
+      # Cleanup sensitive signing files
+      # --------------------------------------------
       - name: Remove signing material
         if: always()
-        run: rm -f android/key.properties android/app/upload-keystore.jks
+        run: |
+          rm -f android/key.properties
+          rm -f android/app/upload-keystore.jks
+          rm -f "$RUNNER_TEMP/bundletool.jar"
