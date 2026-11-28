@@ -300,7 +300,7 @@ jobs:
           npx --yes firebase-tools appdistribution:distribute \
             build/app/outputs/flutter-apk/app-release.apk \
             --app "$FIREBASE_APP_ID" \
-            --groups "qa" \
+            --groups "dev" \
             --release-notes "Android Internal Testing - ${VERSION_NAME}+${BUILD_NUMBER}" \
             --token "$FIREBASE_TOKEN" \
             --non-interactive
